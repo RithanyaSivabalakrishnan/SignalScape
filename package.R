@@ -151,14 +151,14 @@ ui <- fluidPage(
                   selected = "All",
                   multiple = TRUE),
       
-      selectInput("band_filter", "Filter by Technology Band:",
+      selectInput("band_filter", "Filter by Technologya Band:",
                   choices = sort(unique(final_data_ready$BAND_MHz)),
                   selected = unique(final_data_ready$BAND_MHz),
                   multiple = TRUE),
       
       selectInput("quality_filter", "Minimum Signal Strength:",
                   choices = c("All",levels(final_data_ready$Signal_Strength_Score)),
-                  selected = "All",
+                  selected = "5 (Excellent)",
                   multiple = FALSE),
       
       hr(),
@@ -229,29 +229,36 @@ server <- function(input, output, session) {
       setView(lng = 78.96, lat = 20.59, zoom = 4)
   })
   
+  # --- Reactive Filtering ---
   filtered_data <- reactive({
-    data <- cleaned_data
-    selected_cities <- input$city_filter
-    if (!"All" %in% selected_cities){
-      data <- data %>% filter(City %in% selected_cities) 
+    
+    # Start with the full, final dataset
+    data <- final_data_ready
+    
+    # 1. Filter by City
+    if (input$city_filter != "All") {
+      data <- data %>% filter(City == input$city_filter)
     }
+    
+    # 2. Filter by Carrier
     selected_carriers <- input$carrier_filter
     if (!"All" %in% selected_carriers) {
       data <- data %>% filter(Carrier %in% selected_carriers)
     }
     
-    data <- data %>% filter(BAND_MHz %in% input$band_filter)
+    # 3. Filter by Band
+    selected_bands <- input$band_filter
+    if (!"All" %in% selected_bands) {
+      data <- data %>% filter(BAND_MHz %in% selected_bands)
+    }
     
+    # 4. Filter by Signal Quality (THE CORRECTED LOGIC)
     if (input$quality_filter != "All") {
       data <- data %>%
         filter(Signal_Strength_Score == input$quality_filter)
     }
-    else
-    {
-      min_level <- which(levels(final_data_ready$Signal_Strength_Score) == input$quality_filter)
-      data %>%
-        filter(as.integer(Signal_Strength_Score) >= 1)
-    }
+    
+    # Return the final filtered data
     data
   })
   observe({
@@ -268,9 +275,49 @@ server <- function(input, output, session) {
         radius =15 
       )
   })
+  # --- TAB 2: Performance Insights ---
+  
+  # Chart 1: Download Speed Bar Plot
+  output$dl_speed_bar <- renderPlot({
+    
+    # Don't run if no data is filtered
+    req(nrow(filtered_data()) > 0)
+    
+    filtered_data() %>%
+      group_by(Carrier) %>%
+      summarise(Avg_DL_Speed = mean(DL_Speed_kbps, na.rm = TRUE)) %>%
+      ggplot(aes(x = reorder(Carrier, -Avg_DL_Speed), y = Avg_DL_Speed, fill = Carrier)) +
+      geom_bar(stat = "identity") +
+      labs(x = "Carrier", y = "Avg. Download Speed (kbps)") +
+      theme_minimal() +
+      theme(legend.position = "none") # Hide legend since X-axis is clear
+  })
+  output$snr_box <- renderPlot({
+    
+    # Don't run if no data is filtered
+    req(nrow(filtered_data()) > 0)
+    
+    ggplot(filtered_data(), aes(x = Carrier, y = SNR_dB, fill = Carrier)) +
+      geom_boxplot() +
+      labs(x = "Carrier", y = "Signal Quality (SNR dB)") +
+      theme_minimal() +
+      theme(legend.position = "none") # Hide legend
+  })
+  output$dl_vs_rxlev_scatter <- renderPlot({
+    
+    # Don't run if no data is filtered
+    req(nrow(filtered_data()) > 0)
+    
+    ggplot(filtered_data(), aes(x = RXLEV_dBm, y = DL_Speed_kbps, color = SNR_Quality)) +
+      geom_point(alpha = 0.7) + # Use semi-transparent points
+      geom_smooth(method = "lm", se = FALSE, color = "blue") + # Add a trend line
+      labs(x = "Signal Strength (RXLEV dBm)", 
+           y = "Download Speed (kbps)", 
+           color = "SNR Quality") +
+      theme_minimal()
+  })
   
 }
 
 # 3. Run the App
 shinyApp(ui = ui, server = server)
-
