@@ -157,18 +157,14 @@ ui <- fluidPage(
                   multiple = FALSE),
  
       selectInput("carrier_filter", "Select Carrier:",
-                  choices = c("All", carrier_choices), 
+                  choices = c("All", as.character(carrier_choices)), 
                   selected = "All",
                   multiple = TRUE),
       
       selectInput("quality_filter", "Minimum Signal Strength:",
                   choices = levels(final_data_ready$Signal_Strength_Score),
                   selected = "All",
-                  multiple = FALSE),
-      hr(),
-      h5(strong("Statistical Model")),
-      p("The Linear Regression model is applied based on the current filters."),
-      p(em("Explore model coefficients in the 'Model Explorer' tab."))
+                  multiple = FALSE)
     ),
 
     mainPanel(
