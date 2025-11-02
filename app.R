@@ -5,6 +5,7 @@ library(stringr)
 library(sf)
 library(leaflet)
 library(ggplot2)
+library(terra)
 
 city_bounds <- list(
   
@@ -45,7 +46,7 @@ carrier_map <- tribble(
   999, "Other/Unknown" 
 )
 
-raw_full_data <- read_csv("Network Features Data.csv")  #Stores the data as tibble
+raw_full_data <- read_csv("Network Features Data.csv")
 
 initial_data <- raw_full_data %>% 
   rename(
@@ -54,61 +55,83 @@ initial_data <- raw_full_data %>%
     DL_Speed_kbps = `DL Speed (kbps)`,
     BAND_MHz = BAND
   ) %>%
-  #Reorders and selects
-  select(City, MNC, RXLEV_dBm, SNR_dB, DL_Speed_kbps, Latitude, Longitude, BAND_MHz, everything()) #Selects all other columns that are not explicitly mentioned
+  select(City, MNC, RXLEV_dBm, SNR_dB, DL_Speed_kbps, Latitude, Longitude, BAND_MHz, everything())
 
 is_valid_geospatial <- function(lat, lon, city) {
-  
   bounds <- city_bounds[[city]]
-  
   if (!is.null(bounds)) {
     return(lat >= bounds$lat_min & lat <= bounds$lat_max &
              lon >= bounds$lon_min & lon <= bounds$lon_max)
   }
-  return(FALSE) 
+  return(FALSE)
 }
 
 cleaned_data <- initial_data %>%
-  
-  #Geospatial filtering
-  rowwise() %>% 
-  mutate(                      #add or modify a col
-    is_valid = is_valid_geospatial(Latitude, Longitude, City)  
+  rowwise() %>%
+  mutate(
+    is_valid = is_valid_geospatial(Latitude, Longitude, City)
   ) %>%
-  ungroup() %>%                #reverts the data frame
-  filter(is_valid == TRUE) %>% # Keep only the valid rows
-  select(-is_valid) %>%        #drop col is_valid
-  
-  #Carrier mapping
-  left_join(carrier_map, by = "MNC") %>%  #joins carrier_map with main data with MNC as common key
-  
+  ungroup() %>%
+  filter(is_valid == TRUE) %>%
+  select(-is_valid) %>%
+  left_join(carrier_map, by = "MNC") %>%
   mutate(
     Carrier = if_else(is.na(CarrierName), "Other/Unknown", CarrierName)
   ) %>%
-  select(-CarrierName) %>% 
-  
-  #Feature engineering
+  select(-CarrierName) %>%
   mutate(
-    Signal_Strength_Score = cut(RXLEV_dBm,                  #creates a categorical variable from a numeric value
+    Signal_Strength_Score = cut(RXLEV_dBm,
                                 breaks = c(-Inf, -100, -90, -80, -70, -50, Inf),
                                 labels = c("1 (Poor)", "2 (Fair)", "3 (Good)", "4 (Very Good)", "5 (Excellent)", "1 (Poor)"),
-                                right = FALSE,                #Right interval excluded
-                                ordered_result = TRUE),       #Makes ordinal
-    
+                                right = FALSE,
+                                ordered_result = TRUE),
     SNR_Quality = cut(SNR_dB,
                       breaks = c(-Inf, 5, 13, 20, Inf), 
                       labels = c("Poor", "Fair", "Good", "Excellent"),
                       right = FALSE,
                       ordered_result = TRUE)
   )
+
 final_data_ready <- cleaned_data %>%
   mutate(
-    #Population_Density = 
-    
-    City = as.factor(City),       #factor-Represent categorical variables
+    City = as.factor(City),
     Carrier = as.factor(Carrier),
     BAND_MHz = as.factor(BAND_MHz)
   )
+clean_data =cleaned_data
+tif_files <- list.files(path = "C:\\Users\\kavin\\Downloads\\population_ind_pak_general\\population_ind_pak_general", pattern = "^population_.*_general.*\\.tif$",full.names = TRUE)
+
+print("Found these population files:")
+print(tif_files)
+
+# 2. Load all .tif files into a single "virtual" raster map
+pop_raster <- vrt(tif_files)
+
+
+# -----------------------------------------------------------------
+# STEP 3: CONVERT POINTS AND EXTRACT DATA
+# -----------------------------------------------------------------
+
+# 1. Convert your *clean* data frame to a spatial 'sf' object
+sf_points <- st_as_sf(clean_data, 
+                      coords = c("Longitude", "Latitude"), 
+                      crs = 4326) # 4326 is the standard GPS code
+
+# 2. Extract the population value for each point
+pop_values <- terra::extract(pop_raster, sf_points)
+
+# 3. Add the new population data back to your clean data frame
+# The data is in column 2 of the pop_values, we rename it for clarity
+final_data <- clean_data %>%
+  mutate(Population_Density = pop_values[, 2])
+
+# 4. Check your new, combined data!
+print("Data with Population Density Added:")
+print(head(final_data))
+
+# ----------------------------------------
+# UI CODE COMMENTED OUT
+# ----------------------------------------
 
 ui <- fluidPage(
   titlePanel("AuraNet: Network Performance Dashboard"),
@@ -119,23 +142,23 @@ ui <- fluidPage(
       h4("Data Filtering & Analysis"),
       
       selectInput("city_filter", "Select City:",
-                  choices = sort(unique(final_data_ready$City)),
-                  selected = "Bengaluru",
+                  choices = c("All",sort(unique(as.character((final_data_ready$City))))),
+                  selected = "All",
                   multiple = FALSE),
- 
+      
       selectInput("carrier_filter", "Select Carrier:",
                   choices = c("All", sort(unique(as.character(final_data_ready$Carrier)))), 
                   selected = "All",
                   multiple = TRUE),
-
-      selectInput("band_filter", "Filter by Technology Band:",
+      
+      selectInput("band_filter", "Filter by Technologya Band:",
                   choices = sort(unique(final_data_ready$BAND_MHz)),
                   selected = unique(final_data_ready$BAND_MHz),
                   multiple = TRUE),
-
+      
       selectInput("quality_filter", "Minimum Signal Strength:",
-                  choices = levels(final_data_ready$Signal_Strength_Score),
-                  selected = "3 (Good)",
+                  choices = c("All",levels(final_data_ready$Signal_Strength_Score)),
+                  selected = "5 (Excellent)",
                   multiple = FALSE),
       
       hr(),
@@ -143,7 +166,7 @@ ui <- fluidPage(
       p("The Linear Regression model is applied based on the current filters."),
       p(em("Explore model coefficients in the 'Model Explorer' tab."))
     ),
-
+    
     mainPanel(
       width = 9,
       # Tabset Panel for multiple views
@@ -194,23 +217,106 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   
   #Reactive filtering
+  output$cityMap <- renderLeaflet({
+    
+    # 1. Create a leaflet object
+    leaflet() %>%
+      
+      # 2. Add the background map (the light-grey map tiles)
+      addProviderTiles(providers$CartoDB.Positron) %>%
+      
+      # 3. Set the starting view (centered on India)
+      setView(lng = 78.96, lat = 20.59, zoom = 4)
+  })
   
+  # --- Reactive Filtering ---
   filtered_data <- reactive({
-    data <- final_data_ready %>%
-      filter(City == input$city_filter) 
-
+    
+    # Start with the full, final dataset
+    data <- final_data_ready
+    
+    # 1. Filter by City
+    if (input$city_filter != "All") {
+      data <- data %>% filter(City == input$city_filter)
+    }
+    
+    # 2. Filter by Carrier
     selected_carriers <- input$carrier_filter
     if (!"All" %in% selected_carriers) {
       data <- data %>% filter(Carrier %in% selected_carriers)
     }
-
-    data <- data %>% filter(BAND_MHz %in% input$band_filter)
-
-    min_level <- which(levels(final_data_ready$Signal_Strength_Score) == input$quality_filter)
-    data %>%
-      filter(as.integer(Signal_Strength_Score) >= min_level)
+    
+    # 3. Filter by Band
+    selected_bands <- input$band_filter
+    if (!"All" %in% selected_bands) {
+      data <- data %>% filter(BAND_MHz %in% selected_bands)
+    }
+    
+    # 4. Filter by Signal Quality (THE CORRECTED LOGIC)
+    if (input$quality_filter != "All") {
+      data <- data %>%
+        filter(Signal_Strength_Score == input$quality_filter)
+    }
+    
+    # Return the final filtered data
+    data
   })
-
+  observe({
+    data_for_map <- filtered_data() # Gets the new data from the "brain"
+    
+    leafletProxy("cityMap", data = data_for_map) %>%
+      clearHeatmap() %>%    # Clears the old heatmap
+      addHeatmap(           # Draws the new one
+        lng = ~Longitude,
+        lat = ~Latitude,
+        intensity = ~RXLEV_dBm, # Colors it based on signal strength
+        blur=20,
+        max = -50,
+        radius =15 
+      )
+  })
+  # --- TAB 2: Performance Insights ---
+  
+  # Chart 1: Download Speed Bar Plot
+  output$dl_speed_bar <- renderPlot({
+    
+    # Don't run if no data is filtered
+    req(nrow(filtered_data()) > 0)
+    
+    filtered_data() %>%
+      group_by(Carrier) %>%
+      summarise(Avg_DL_Speed = mean(DL_Speed_kbps, na.rm = TRUE)) %>%
+      ggplot(aes(x = reorder(Carrier, -Avg_DL_Speed), y = Avg_DL_Speed, fill = Carrier)) +
+      geom_bar(stat = "identity") +
+      labs(x = "Carrier", y = "Avg. Download Speed (kbps)") +
+      theme_minimal() +
+      theme(legend.position = "none") # Hide legend since X-axis is clear
+  })
+  output$snr_box <- renderPlot({
+    
+    # Don't run if no data is filtered
+    req(nrow(filtered_data()) > 0)
+    
+    ggplot(filtered_data(), aes(x = Carrier, y = SNR_dB, fill = Carrier)) +
+      geom_boxplot() +
+      labs(x = "Carrier", y = "Signal Quality (SNR dB)") +
+      theme_minimal() +
+      theme(legend.position = "none") # Hide legend
+  })
+  output$dl_vs_rxlev_scatter <- renderPlot({
+    
+    # Don't run if no data is filtered
+    req(nrow(filtered_data()) > 0)
+    
+    ggplot(filtered_data(), aes(x = RXLEV_dBm, y = DL_Speed_kbps, color = SNR_Quality)) +
+      geom_point(alpha = 0.7) + # Use semi-transparent points
+      geom_smooth(method = "lm", se = FALSE, color = "blue") + # Add a trend line
+      labs(x = "Signal Strength (RXLEV dBm)", 
+           y = "Download Speed (kbps)", 
+           color = "SNR Quality") +
+      theme_minimal()
+  })
+  
 }
 
 # 3. Run the App
