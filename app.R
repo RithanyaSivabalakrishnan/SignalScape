@@ -47,7 +47,7 @@ carrier_map <- tribble(
   999, "Other/Unknown" 
 )
 
-raw_full_data <- read_csv("Network Features Data.csv")
+raw_full_data <- read_csv("Network Features Data.csv")  #Stores the data as tibble
 
 initial_data <- raw_full_data %>% 
   rename(
@@ -56,83 +56,60 @@ initial_data <- raw_full_data %>%
     DL_Speed_kbps = `DL Speed (kbps)`,
     BAND_MHz = BAND
   ) %>%
-  select(City, MNC, RXLEV_dBm, SNR_dB, DL_Speed_kbps, Latitude, Longitude, BAND_MHz, everything())
+  #Reorders and selects
+  select(City, MNC, RXLEV_dBm, SNR_dB, DL_Speed_kbps, Latitude, Longitude, BAND_MHz, everything()) #Selects all other columns that are not explicitly mentioned
 
 is_valid_geospatial <- function(lat, lon, city) {
+  
   bounds <- city_bounds[[city]]
+  
   if (!is.null(bounds)) {
     return(lat >= bounds$lat_min & lat <= bounds$lat_max &
              lon >= bounds$lon_min & lon <= bounds$lon_max)
   }
-  return(FALSE)
+  return(FALSE) 
 }
 
 cleaned_data <- initial_data %>%
-  rowwise() %>%
-  mutate(
-    is_valid = is_valid_geospatial(Latitude, Longitude, City)
+  
+  #Geospatial filtering
+  rowwise() %>% 
+  mutate(                      #add or modify a col
+    is_valid = is_valid_geospatial(Latitude, Longitude, City)  
   ) %>%
-  ungroup() %>%
-  filter(is_valid == TRUE) %>%
-  select(-is_valid) %>%
-  left_join(carrier_map, by = "MNC") %>%
+  ungroup() %>%                #reverts the data frame
+  filter(is_valid == TRUE) %>% # Keep only the valid rows
+  select(-is_valid) %>%        #drop col is_valid
+  
+  #Carrier mapping
+  left_join(carrier_map, by = "MNC") %>%  #joins carrier_map with main data with MNC as common key
+  
   mutate(
     Carrier = if_else(is.na(CarrierName), "Other/Unknown", CarrierName)
   ) %>%
-  select(-CarrierName) %>%
+  select(-CarrierName) %>% 
+  
+  #Feature engineering
   mutate(
-    Signal_Strength_Score = cut(RXLEV_dBm,
+    Signal_Strength_Score = cut(RXLEV_dBm,                  #creates a categorical variable from a numeric value
                                 breaks = c(-Inf, -100, -90, -80, -70, -50, Inf),
                                 labels = c("1 (Poor)", "2 (Fair)", "3 (Good)", "4 (Very Good)", "5 (Excellent)", "1 (Poor)"),
-                                right = FALSE,
-                                ordered_result = TRUE),
+                                right = FALSE,                #Right interval excluded
+                                ordered_result = TRUE),       #Makes ordinal
+    
     SNR_Quality = cut(SNR_dB,
                       breaks = c(-Inf, 5, 13, 20, Inf), 
                       labels = c("Poor", "Fair", "Good", "Excellent"),
                       right = FALSE,
                       ordered_result = TRUE)
   )
-
 final_data_ready <- cleaned_data %>%
   mutate( 
     City = as.factor(City),       #factor-Represent categorical variables
     Carrier = as.factor(Carrier),
+    BAND_MHz = str_trim(BAND_MHz),
     BAND_MHz = as.factor(BAND_MHz)
   )
-clean_data =cleaned_data
-tif_files <- list.files(path = "C:\\Users\\kavin\\Downloads\\population_ind_pak_general\\population_ind_pak_general", pattern = "^population_.*_general.*\\.tif$",full.names = TRUE)
-
-print("Found these population files:")
-print(tif_files)
-
-# 2. Load all .tif files into a single "virtual" raster map
-pop_raster <- vrt(tif_files)
-
-
-# -----------------------------------------------------------------
-# STEP 3: CONVERT POINTS AND EXTRACT DATA
-# -----------------------------------------------------------------
-
-# 1. Convert your *clean* data frame to a spatial 'sf' object
-sf_points <- st_as_sf(clean_data, 
-                      coords = c("Longitude", "Latitude"), 
-                      crs = 4326) # 4326 is the standard GPS code
-
-# 2. Extract the population value for each point
-pop_values <- terra::extract(pop_raster, sf_points)
-
-# 3. Add the new population data back to your clean data frame
-# The data is in column 2 of the pop_values, we rename it for clarity
-final_data <- clean_data %>%
-  mutate(Population_Density = pop_values[, 2])
-
-# 4. Check your new, combined data!
-print("Data with Population Density Added:")
-print(head(final_data))
-
-# ----------------------------------------
-# UI CODE COMMENTED OUT
-# ----------------------------------------
 
 city_choices <- sort(unique(final_data_ready$City))
 carrier_choices <- sort(unique(final_data_ready$Carrier))
@@ -178,7 +155,7 @@ ui <- fluidPage(
                   choices = city_choices,
                   selected = "Bengaluru",
                   multiple = FALSE),
-      
+ 
       selectInput("carrier_filter", "Select Carrier:",
                   choices = c("All", carrier_choices), 
                   selected = "All",
@@ -193,7 +170,7 @@ ui <- fluidPage(
       p("The Linear Regression model is applied based on the current filters."),
       p(em("Explore model coefficients in the 'Model Explorer' tab."))
     ),
-    
+
     mainPanel(
       width = 9,
       # Tabset Panel for multiple views
@@ -275,17 +252,6 @@ server <- function(input, output, session) {
     input$city_filter
   })
   #Reactive filtering
-  output$cityMap <- renderLeaflet({
-    
-    # 1. Create a leaflet object
-    leaflet() %>%
-      
-      # 2. Add the background map (the light-grey map tiles)
-      addProviderTiles(providers$CartoDB.Positron) %>%
-      
-      # 3. Set the starting view (centered on India)
-      setView(lng = 78.96, lat = 20.59, zoom = 4)
-  })
   
   output$cityMap <- renderLeaflet({
     
@@ -313,99 +279,6 @@ server <- function(input, output, session) {
     selected_score <- input$quality_filter
     data <- data %>% filter(Signal_Strength_Score %in% selected_score)
     data
-  })
-  observe({
-    data_for_map <- filtered_data() # Gets the new data from the "brain"
-    
-    leafletProxy("cityMap", data = data_for_map) %>%
-      clearHeatmap() %>%    # Clears the old heatmap
-      addHeatmap(           # Draws the new one
-        lng = ~Longitude,
-        lat = ~Latitude,
-        intensity = ~RXLEV_dBm, # Colors it based on signal strength
-        blur=20,
-        max = -50,
-        radius =15 
-      )
-  })
-  
-  lm_model <- reactive({
-    data <- final_data_ready %>% filter(City == input$city_filter)
-    
-    if (nrow(data) < 15) {
-      return(NULL)
-    }
-    
-    lm(DL_Speed_kbps ~ RXLEV_dBm + SNR_dB + Population_Density + BAND_MHz, data = data)
-  })
-  
-  # Observe the Predict button click and run the prediction
-  observeEvent(input$predict_button, {
-    cat("DEBUG: Predict button clicked\n")
-    model <- lm_model()
-    
-    # 1. Check if the model was successfully trained
-    if (is.null(model)) {
-      output$predictionResult <- renderUI({
-        div(class = "alert alert-warning", role = "alert",
-            paste0("Model Error: Insufficient data points (N < 15) to run a meaningful regression for ", input$city_filter, ". Please select a city with more data."))
-      })
-      return()
-    }
-    
-    # 2. Create new data frame for prediction
-    new_data <- data.frame(
-      RXLEV_dBm = input$pred_rxlev,
-      SNR_dB = input$pred_snr,
-      Population_Density = input$pred_density,
-      BAND_MHz = factor(input$pred_band, levels = levels(final_data_ready$BAND_MHz)) # Ensure factor levels match training data
-    )
-    cat("DEBUG: Model is NULL? ", is.null(model), "\n")
-    # 3. Perform Prediction
-    prediction <- tryCatch({
-      predict(model, newdata = new_data)
-    }, error = function(e) {
-      # Handle prediction error (e.g., factor level not found)
-      cat("DEBUG: Prediction error -", e$message, "\n")
-      return(NULL)
-    })
-    cat("DEBUG: Prediction result = ", prediction, "\n")
-    # 4. Display the result
-    if (!is.null(prediction)) {
-      
-      pred_value <- round(as.numeric(prediction), 0)
-      
-      output$predictionResult <- renderUI({
-        
-        # Determine color based on prediction value (Mock thresholds)
-        color_class <- case_when(
-          pred_value < 1000 ~ "text-danger",
-          pred_value < 2500 ~ "text-warning",
-          TRUE ~ "text-success"
-        )
-        
-        # Converted from HTML(paste0(...)) to native Shiny tag functions (tagList, p, h1, strong)
-        tagList(
-          p(style = "font-size: 1.2em;", 
-            "Based on your inputs, the predicted Download Speed in ", 
-            strong(input$city_filter), 
-            " is:"
-          ),
-          h1(class = color_class, 
-             paste(format(pred_value, big.mark = ","), "kbps")
-          ),
-          p(style = "font-style: italic; margin-top: 15px;",
-            paste0("(Note: This prediction is based on the trained linear model for ", 
-                   input$city_filter, " data points only.)")
-          )
-        )
-      })
-    } else {
-      output$predictionResult <- renderUI({
-        div(class = "alert alert-danger", role = "alert",
-            "Prediction Failed. Please check your inputs or model structure.")
-      })
-    }
   })
   observe({
     data_for_map <- filtered_data() # Gets the new data from the "brain"
@@ -462,7 +335,110 @@ server <- function(input, output, session) {
            color = "SNR Quality") +
       theme_minimal()
   })
+ 
+  lm_model <- reactive({
+    data <- final_data_ready %>%
+      filter(City == input$city_filter) %>%
+      filter(!is.na(DL_Speed_kbps),
+             !is.na(RXLEV_dBm),
+             !is.na(SNR_dB),
+             !is.na(Population_Density))
+    
+    # Ensure BAND_MHz has all levels from full dataset
+    data$BAND_MHz <- factor(data$BAND_MHz, levels = unique(final_data_ready$BAND_MHz))
+    
+    # Drop constant-factor columns to avoid contrasts error
+    factors_with_single_level <- names(which(sapply(data, function(x) is.factor(x) && length(unique(x)) < 2)))
+    if (length(factors_with_single_level) > 0) {
+      formula_str <- paste(
+        "DL_Speed_kbps ~", 
+        paste(setdiff(c("RXLEV_dBm", "SNR_dB", "Population_Density", "BAND_MHz"), factors_with_single_level), collapse = " + ")
+      )
+    } else {
+      formula_str <- "DL_Speed_kbps ~ RXLEV_dBm + SNR_dB + Population_Density + BAND_MHz"
+    }
+    
+    cat("DEBUG: Model formula =", formula_str, "\n")
+    lm(as.formula(formula_str), data = data)
+  })
   
+
+  # Observe the Predict button click and run the prediction
+  # Observe the Predict button click and run the prediction
+  observeEvent(input$predict_button, {
+    cat("DEBUG: Predict button clicked\n")
+    model <- lm_model()
+    
+    if (is.null(model) || length(model$residuals) < 15) { # Added check for minimum observations
+      output$predictionResult <- renderUI({
+        div(class = "alert alert-warning", role = "alert",
+            paste0("Model Error: Insufficient data points (N < 15) or model failed to run for ", input$city_filter))
+      })
+      return()
+    }
+    
+    # Extract variables actually used in model
+    model_vars <- all.vars(formula(model))
+    
+    # --- FIX IS HERE: Use levels from the MODEL's data structure ---
+    model_band_levels <- levels(model$model$BAND_MHz)
+    
+    # Build new_data only with variables used in the model
+    new_data <- data.frame(
+      RXLEV_dBm = input$pred_rxlev,
+      SNR_dB = input$pred_snr,
+      Population_Density = input$pred_density,
+      # Re-factor the input with the levels *actually used by the model*
+      BAND_MHz = factor(input$pred_band, levels = model_band_levels) 
+    )[model_vars[model_vars != "DL_Speed_kbps"]] 
+    
+    # Check if the selected band is actually a level in the model
+    if (!input$pred_band %in% model_band_levels) {
+      output$predictionResult <- renderUI({
+        div(class = "alert alert-warning", role = "alert",
+            paste0("Prediction Warning: The selected BAND (", input$pred_band, 
+                   ") was not present in the data for ", input$city_filter, ". Prediction may be unreliable or fail."))
+      })
+      return()
+    }
+    
+    # Safe prediction
+    prediction <- tryCatch({
+      predict(model, newdata = new_data)
+    }, error = function(e) {
+      cat("DEBUG: Prediction error -", e$message, "\n")
+      return(NULL)
+    })
+    
+    # ... (Rest of your prediction result rendering code) ...
+    if (!is.null(prediction)) {
+      pred_value <- round(as.numeric(prediction), 0)
+      
+      output$predictionResult <- renderUI({
+        color_class <- case_when(
+          pred_value < 1000 ~ "text-danger",
+          pred_value < 2500 ~ "text-warning",
+          TRUE ~ "text-success"
+        )
+        
+        tagList(
+          p(style = "font-size: 1.2em;",  
+            "Based on your inputs, the predicted Download Speed in ",  
+            strong(input$city_filter), " is:"
+          ),
+          h1(class = color_class, paste(format(pred_value, big.mark = ","), "kbps")),
+          p(style = "font-style: italic; margin-top: 15px;",
+            paste0("(Note: Prediction based on model trained for ", input$city_filter, ")"))
+        )
+      })
+    } else {
+      output$predictionResult <- renderUI({
+        div(class = "alert alert-danger", role = "alert",
+            "Prediction Failed. Please check your inputs or the model structure (e.g., band not in city data).")
+      })
+    }
+  })
+
 }
 #options(shiny.error = recover)
 
