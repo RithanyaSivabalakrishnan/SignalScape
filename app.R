@@ -5,6 +5,8 @@ library(stringr)
 library(sf)
 library(leaflet)
 library(ggplot2)
+library(terra)
+library(leaflet.extras)
 
 city_bounds <- list(
   
@@ -102,13 +104,43 @@ cleaned_data <- initial_data %>%
                       ordered_result = TRUE)
   )
 final_data_ready <- cleaned_data %>%
-  mutate(
-    #Population_Density = 
-    
+  mutate( 
     City = as.factor(City),       #factor-Represent categorical variables
     Carrier = as.factor(Carrier),
     BAND_MHz = as.factor(BAND_MHz)
   )
+
+city_choices <- sort(unique(final_data_ready$City))
+carrier_choices <- sort(unique(final_data_ready$Carrier))
+band_choices <- sort(unique(final_data_ready$BAND_MHz))
+
+clean_data =cleaned_data
+tif_files <- list.files(path = "C:\\Users\\Ritha\\OneDrive\\Desktop\\AuraNet\\population_ind_pak_general", pattern = "^population_.*_general.*\\.tif$",full.names = TRUE)
+
+if (length(tif_files) == 0) {
+  stop("No .tif files found in the specified directory!")
+}
+
+print(tif_files)
+pop_raster <- terra::vrt(tif_files)
+
+
+# -----------------------------------------------------------------
+# STEP 3: CONVERT POINTS AND EXTRACT DATA
+# -----------------------------------------------------------------
+
+# 1. Convert your *clean* data frame to a spatial 'sf' object
+sf_points <- st_as_sf(clean_data, 
+                      coords = c("Longitude", "Latitude"), 
+                      crs = 4326) # 4326 is the standard GPS code
+
+# 2. Extract the population value for each point
+pop_values <- terra::extract(pop_raster, sf_points)
+
+# 3. Add the new population data back to your clean data frame
+# The data is in column 2 of the pop_values, we rename it for clarity
+final_data_ready <- clean_data %>%
+  mutate(Population_Density = pop_values[, 2])
 
 ui <- fluidPage(
   titlePanel("AuraNet: Network Performance Dashboard"),
@@ -119,25 +151,19 @@ ui <- fluidPage(
       h4("Data Filtering & Analysis"),
       
       selectInput("city_filter", "Select City:",
-                  choices = sort(unique(final_data_ready$City)),
+                  choices = city_choices,
                   selected = "Bengaluru",
                   multiple = FALSE),
  
       selectInput("carrier_filter", "Select Carrier:",
-                  choices = c("All", sort(unique(as.character(final_data_ready$Carrier)))), 
+                  choices = c("All", carrier_choices), 
                   selected = "All",
                   multiple = TRUE),
-
-      selectInput("band_filter", "Filter by Technology Band:",
-                  choices = sort(unique(final_data_ready$BAND_MHz)),
-                  selected = unique(final_data_ready$BAND_MHz),
-                  multiple = TRUE),
-
+      
       selectInput("quality_filter", "Minimum Signal Strength:",
                   choices = levels(final_data_ready$Signal_Strength_Score),
-                  selected = "3 (Good)",
+                  selected = "All",
                   multiple = FALSE),
-      
       hr(),
       h5(strong("Statistical Model")),
       p("The Linear Regression model is applied based on the current filters."),
@@ -180,10 +206,38 @@ ui <- fluidPage(
         
         # TAB 3: Model Explorer (Linear Regression Output)
         tabPanel("Model Explorer", icon = icon("flask"),
-                 h4("Linear Regression Model Summary: DL Speed Drivers"),
-                 p(strong("Dependent Variable:"), " DL Speed (kbps)"),
-                 p(strong("Predictors:"), " RXLEV (dBm), SNR (dB), Population Density, and BAND (MHz)"),
-                 verbatimTextOutput("modelSummary")
+                  h4("Predict Download Speed (DL Speed)"),
+                  p("Use the controls below to predict the DL Speed (kbps) for the selected city (",
+                    span(textOutput("model_city_label", inline = TRUE), style = "font-weight: bold;"),
+                    ") based on the Linear Regression model."),
+                 
+                 fluidRow(
+                   column(4, 
+                          numericInput("pred_rxlev", "RXLEV (dBm):", value = -85, min = -150, max = -50, step = 1),
+                          p(em("Closer to 0 is better signal."))
+                   ),
+                   column(4, 
+                          numericInput("pred_snr", "SNR (dB):", value = 15, min = 0, max = 30, step = 1),
+                          p(em("Higher SNR is better signal quality."))
+                   ),
+                   column(4, 
+                          numericInput("pred_density", "Population Density:", value = 5000, min = 10, max = 50000, step = 100),
+                          p(em("Mock environmental variable."))
+                   )
+                 ),
+                 
+                 fluidRow(
+                   column(6, 
+                          selectInput("pred_band", "BAND (MHz):", choices = band_choices, selected = band_choices[1], multiple = FALSE)
+                   ),
+                   column(6, 
+                          actionButton("predict_button", "Predict DL Speed (kbps)", class = "btn-primary mt-4", style = "margin-top: 30px;")
+                   )
+                 ),
+                 
+                 hr(),
+                 h5(strong("Prediction Result:")), 
+                 uiOutput("predictionResult")
         )
       )
     )
@@ -193,25 +247,134 @@ ui <- fluidPage(
 # 2. Server Definition
 server <- function(input, output, session) {
   
+  output$model_city_label <- renderText({
+    input$city_filter
+  })
   #Reactive filtering
   
+  output$cityMap <- renderLeaflet({
+    
+    # 1. Create a leaflet object
+    leaflet() %>%
+      
+      # 2. Add the background map (the light-grey map tiles)
+      addProviderTiles(providers$CartoDB.Positron) %>%
+      
+      # 3. Set the starting view (centered on India)
+      setView(lng = 78.96, lat = 20.59, zoom = 4)
+  })
+  
   filtered_data <- reactive({
-    data <- final_data_ready %>%
-      filter(City == input$city_filter) 
-
+    data <- cleaned_data
+    
+    selected_cities <- input$city_filter
+    data <- data %>% filter(City %in% selected_cities) 
+    
     selected_carriers <- input$carrier_filter
     if (!"All" %in% selected_carriers) {
       data <- data %>% filter(Carrier %in% selected_carriers)
     }
-
-    data <- data %>% filter(BAND_MHz %in% input$band_filter)
-
-    min_level <- which(levels(final_data_ready$Signal_Strength_Score) == input$quality_filter)
-    data %>%
-      filter(as.integer(Signal_Strength_Score) >= min_level)
+    
+    selected_score <- input$quality_filter
+    data <- data %>% filter(Signal_Strength_Score %in% selected_score)
+    data
+  })
+  observe({
+    data_for_map <- filtered_data() # Gets the new data from the "brain"
+    
+    leafletProxy("cityMap", data = data_for_map) %>%
+      clearHeatmap() %>%    # Clears the old heatmap
+      addHeatmap(           # Draws the new one
+        lng = ~Longitude,
+        lat = ~Latitude,
+        intensity = ~RXLEV_dBm, # Colors it based on signal strength
+        blur=20,
+        max = -50,
+        radius =15 
+      )
+  })
+  
+  lm_model <- reactive({
+    data <- final_data_ready %>% filter(City == input$city_filter)
+    
+    if (nrow(data) < 15) {
+      return(NULL)
+    }
+    
+    lm(DL_Speed_kbps ~ RXLEV_dBm + SNR_dB + Population_Density + BAND_MHz, data = data)
+  })
+  
+  # Observe the Predict button click and run the prediction
+  observeEvent(input$predict_button, {
+    cat("DEBUG: Predict button clicked\n")
+    model <- lm_model()
+    
+    # 1. Check if the model was successfully trained
+    if (is.null(model)) {
+      output$predictionResult <- renderUI({
+        div(class = "alert alert-warning", role = "alert",
+            paste0("Model Error: Insufficient data points (N < 15) to run a meaningful regression for ", input$city_filter, ". Please select a city with more data."))
+      })
+      return()
+    }
+    
+    # 2. Create new data frame for prediction
+    new_data <- data.frame(
+      RXLEV_dBm = input$pred_rxlev,
+      SNR_dB = input$pred_snr,
+      Population_Density = input$pred_density,
+      BAND_MHz = factor(input$pred_band, levels = levels(final_data_ready$BAND_MHz)) # Ensure factor levels match training data
+    )
+    cat("DEBUG: Model is NULL? ", is.null(model), "\n")
+    # 3. Perform Prediction
+    prediction <- tryCatch({
+      predict(model, newdata = new_data)
+    }, error = function(e) {
+      # Handle prediction error (e.g., factor level not found)
+      cat("DEBUG: Prediction error -", e$message, "\n")
+      return(NULL)
+    })
+    cat("DEBUG: Prediction result = ", prediction, "\n")
+    # 4. Display the result
+    if (!is.null(prediction)) {
+      
+      pred_value <- round(as.numeric(prediction), 0)
+      
+      output$predictionResult <- renderUI({
+        
+        # Determine color based on prediction value (Mock thresholds)
+        color_class <- case_when(
+          pred_value < 1000 ~ "text-danger",
+          pred_value < 2500 ~ "text-warning",
+          TRUE ~ "text-success"
+        )
+        
+        # Converted from HTML(paste0(...)) to native Shiny tag functions (tagList, p, h1, strong)
+        tagList(
+          p(style = "font-size: 1.2em;", 
+            "Based on your inputs, the predicted Download Speed in ", 
+            strong(input$city_filter), 
+            " is:"
+          ),
+          h1(class = color_class, 
+             paste(format(pred_value, big.mark = ","), "kbps")
+          ),
+          p(style = "font-style: italic; margin-top: 15px;",
+            paste0("(Note: This prediction is based on the trained linear model for ", 
+                   input$city_filter, " data points only.)")
+          )
+        )
+      })
+    } else {
+      output$predictionResult <- renderUI({
+        div(class = "alert alert-danger", role = "alert",
+            "Prediction Failed. Please check your inputs or model structure.")
+      })
+    }
   })
 
 }
+#options(shiny.error = recover)
 
 # 3. Run the App
 shinyApp(ui = ui, server = server)
