@@ -1,23 +1,27 @@
+# -----------------------------------------------------------------
+# 1. LOAD LIBRARIES
+# -----------------------------------------------------------------
 library(shiny)
 library(dplyr)
 library(readr)
 library(stringr)
 library(sf)
 library(leaflet)
+library(leaflet.extras) # For the heatmap
 library(ggplot2)
 library(terra)
+library(cluster)        # For K-Means Clustering
 
+# -----------------------------------------------------------------
+# 2. SETUP: BOUNDING BOXES & CARRIER MAP
+# -----------------------------------------------------------------
 city_bounds <- list(
-  
   Ahmedabad = list(lat_min = 22.80, lat_max = 23.30, lon_min = 72.30, lon_max = 72.85),
   Mumbai = list(lat_min = 18.80, lat_max = 19.35, lon_min = 72.70, lon_max = 73.10),
   Pune = list(lat_min = 18.40, lat_max = 18.75, lon_min = 73.70, lon_max = 74.20),
-  Surat = list(lat_min = 21.10, lat_max = 21.35, lon_min = 72.75, lon_max = 73.00),
-  
   Bengaluru = list(lat_min = 12.80, lat_max = 13.15, lon_min = 77.40, lon_max = 77.85),
   Chennai = list(lat_min = 12.90, lat_max = 13.25, lon_min = 80.10, lon_max = 80.40),
   Hyderabad = list(lat_min = 17.30, lat_max = 17.55, lon_min = 78.30, lon_max = 78.60),
-  
   Delhi = list(lat_min = 28.35, lat_max = 28.95, lon_min = 76.80, lon_max = 77.45),
   Kolkata = list(lat_min = 22.45, lat_max = 22.70, lon_min = 88.25, lon_max = 88.55),
   Jaipur = list(lat_min = 26.80, lat_max = 27.05, lon_min = 75.70, lon_max = 76.00),
@@ -26,37 +30,35 @@ city_bounds <- list(
 
 carrier_map <- tribble(
   ~MNC, ~CarrierName,
-  872, "Airtel",
-  870, "Airtel",
-  871, "Airtel",
-  873, "Airtel",
-  874, "Airtel",
-  861, "Airtel",
-  860, "Airtel", 
-  865, "Airtel",
-  866, "Airtel",
-  868, "Vodafone Idea",
-  862, "Vodafone Idea",
-  869, "Vodafone Idea",
-  863, "Vodafone Idea",
-  864, "Vodafone Idea", 
-  867, "Vodafone Idea",
+  872, "Airtel", 870, "Airtel", 871, "Airtel", 873, "Airtel", 874, "Airtel",
+  861, "Airtel", 860, "Airtel", 865, "Airtel", 866, "Airtel",
+  868, "Vodafone Idea", 862, "Vodafone Idea", 869, "Vodafone Idea",
+  863, "Vodafone Idea", 864, "Vodafone Idea", 867, "Vodafone Idea",
   858, "Reliance Jio",
   888, "BSNL",
-  999, "Other/Unknown" 
+  999, "Other/Unknown"
 )
 
+# -----------------------------------------------------------------
+# 3. DATA PREPARATION (Adding all features)
+# -----------------------------------------------------------------
+
+# --- Step 3a: Load and Rename ---
+print("Loading raw data...")
 raw_full_data <- read_csv("Network Features Data.csv")
 
-initial_data <- raw_full_data %>% 
+initial_data <- raw_full_data %>%
   rename(
-    RXLEV_dBm = `RXLEV (dBm)`, 
-    SNR_dB = `SNR (dB)`, 
+    RXLEV_dBm = `RXLEV (dBm)`,
+    SNR_dB = `SNR (dB)`,
     DL_Speed_kbps = `DL Speed (kbps)`,
-    BAND_MHz = BAND
-  ) %>%
-  select(City, MNC, RXLEV_dBm, SNR_dB, DL_Speed_kbps, Latitude, Longitude, BAND_MHz, everything())
+    BAND_MHz = BAND,
+    RXQUAL = RXQUAL,
+    Physical_Speed = `Speed (m/s)`,
+    Height_m = `Height (m)`
+  )
 
+# --- Step 3b: Geospatial Cleaning ---
 is_valid_geospatial <- function(lat, lon, city) {
   bounds <- city_bounds[[city]]
   if (!is.null(bounds)) {
@@ -68,16 +70,32 @@ is_valid_geospatial <- function(lat, lon, city) {
 
 cleaned_data <- initial_data %>%
   rowwise() %>%
-  mutate(
-    is_valid = is_valid_geospatial(Latitude, Longitude, City)
-  ) %>%
+  mutate(is_valid = is_valid_geospatial(Latitude, Longitude, City)) %>%
   ungroup() %>%
   filter(is_valid == TRUE) %>%
-  select(-is_valid) %>%
+  select(-is_valid)
+
+# --- Step 3c: Population Join ---
+print("Loading population data...")
+tif_files <- list.files(path = "C:\\Users\\kavin\\Downloads\\population_ind_pak_general\\population_ind_pak_general", pattern = "^population_.*_general.*\\.tif$", full.names = TRUE)
+if (length(tif_files) == 0) {
+  stop("No .tif files found. Check the file path.")
+}
+pop_raster <- terra::vrt(tif_files)
+sf_points <- st_as_sf(cleaned_data,
+                      coords = c("Longitude", "Latitude"),
+                      crs = 4326)
+pop_values <- terra::extract(pop_raster, sf_points)
+
+final_data <- cleaned_data %>%
+  mutate(Population_Density = pop_values[, 2]) %>%
+  mutate(Population_Density = ifelse(is.na(Population_Density), 0, Population_Density)) # Fix NAs
+
+# --- Step 3d: Final Feature Engineering ---
+print("Creating final features...")
+final_data_ready <- final_data %>%
   left_join(carrier_map, by = "MNC") %>%
-  mutate(
-    Carrier = if_else(is.na(CarrierName), "Other/Unknown", CarrierName)
-  ) %>%
+  mutate(Carrier = if_else(is.na(CarrierName), "Other/Unknown", CarrierName)) %>%
   select(-CarrierName) %>%
   mutate(
     Signal_Strength_Score = cut(RXLEV_dBm,
@@ -86,53 +104,31 @@ cleaned_data <- initial_data %>%
                                 right = FALSE,
                                 ordered_result = TRUE),
     SNR_Quality = cut(SNR_dB,
-                      breaks = c(-Inf, 5, 13, 20, Inf), 
+                      breaks = c(-Inf, 5, 13, 20, Inf),
                       labels = c("Poor", "Fair", "Good", "Excellent"),
                       right = FALSE,
                       ordered_result = TRUE)
-  )
-
-final_data_ready <- cleaned_data %>%
+  ) %>%
   mutate(
     City = as.factor(City),
     Carrier = as.factor(Carrier),
-    BAND_MHz = as.factor(BAND_MHz)
+    BAND_MHz = as.factor(str_trim(BAND_MHz)),
+    SNR_Quality = as.factor(SNR_Quality)
   )
-clean_data =cleaned_data
-tif_files <- list.files(path = "C:\\Users\\kavin\\Downloads\\population_ind_pak_general\\population_ind_pak_general", pattern = "^population_.*_general.*\\.tif$",full.names = TRUE)
 
-print("Found these population files:")
-print(tif_files)
+# --- Step 3e: Create Choice Lists for UI ---
+city_choices <- c("All", sort(unique(as.character(final_data_ready$City))))
+carrier_choices <- c("All", sort(unique(as.character(final_data_ready$Carrier))))
+band_choices <- c("All", sort(unique(as.character(final_data_ready$BAND_MHz))))
+quality_choices <- c("All", levels(final_data_ready$Signal_Strength_Score))
+# List of numeric variables for clustering
+cluster_vars <- c("RXLEV_dBm", "SNR_dB", "DL_Speed_kbps", "RXQUAL", "Physical_Speed", "Height_m", "Population_Density")
 
-# 2. Load all .tif files into a single "virtual" raster map
-pop_raster <- vrt(tif_files)
 
-
+print("Data preparation complete. Starting app...")
 # -----------------------------------------------------------------
-# STEP 3: CONVERT POINTS AND EXTRACT DATA
+# 4. SHINY UI (USER INTERFACE)
 # -----------------------------------------------------------------
-
-# 1. Convert your *clean* data frame to a spatial 'sf' object
-sf_points <- st_as_sf(clean_data, 
-                      coords = c("Longitude", "Latitude"), 
-                      crs = 4326) # 4326 is the standard GPS code
-
-# 2. Extract the population value for each point
-pop_values <- terra::extract(pop_raster, sf_points)
-
-# 3. Add the new population data back to your clean data frame
-# The data is in column 2 of the pop_values, we rename it for clarity
-final_data <- clean_data %>%
-  mutate(Population_Density = pop_values[, 2])
-
-# 4. Check your new, combined data!
-print("Data with Population Density Added:")
-print(head(final_data))
-
-# ----------------------------------------
-# UI CODE COMMENTED OUT
-# ----------------------------------------
-
 ui <- fluidPage(
   titlePanel("AuraNet: Network Performance Dashboard"),
   
@@ -142,182 +138,222 @@ ui <- fluidPage(
       h4("Data Filtering & Analysis"),
       
       selectInput("city_filter", "Select City:",
-                  choices = c("All",sort(unique(as.character((final_data_ready$City))))),
+                  choices = city_choices,
                   selected = "All",
                   multiple = FALSE),
       
       selectInput("carrier_filter", "Select Carrier:",
-                  choices = c("All", sort(unique(as.character(final_data_ready$Carrier)))), 
+                  choices = carrier_choices,
                   selected = "All",
                   multiple = TRUE),
       
-      selectInput("band_filter", "Filter by Technologya Band:",
-                  choices = sort(unique(final_data_ready$BAND_MHz)),
-                  selected = unique(final_data_ready$BAND_MHz),
+      selectInput("band_filter", "Filter by Technology Band:",
+                  choices = band_choices,
+                  selected = "All",
                   multiple = TRUE),
       
-      selectInput("quality_filter", "Minimum Signal Strength:",
-                  choices = c("All",levels(final_data_ready$Signal_Strength_Score)),
-                  selected = "5 (Excellent)",
-                  multiple = FALSE),
-      
-      hr(),
-      h5(strong("Statistical Model")),
-      p("The Linear Regression model is applied based on the current filters."),
-      p(em("Explore model coefficients in the 'Model Explorer' tab."))
+      selectInput("quality_filter", "Filter by Signal Strength:",
+                  choices = quality_choices,
+                  selected = "All",
+                  multiple = FALSE)
     ),
     
     mainPanel(
       width = 9,
-      # Tabset Panel for multiple views
       tabsetPanel(
         id = "main_tabs",
         
-        # TAB 1: Geospatial Heatmap (Hexbin Concept Simulation)
+        # --- TAB 1: Map ---
         tabPanel("Geospatial Heatmap", icon = icon("map-marker-alt"),
                  h4("Cellular Signal Strength (RXLEV) by Location"),
-                 p("The map simulates Hexagonal Binning by aggregating mean signal strength within the filtered area."),
+                 p("The map shows the density and strength of signal readings."),
                  leafletOutput("cityMap", height = "75vh")
         ),
         
-        # TAB 2: Performance Insights (Charts)
+        # --- TAB 2: Plots ---
         tabPanel("Performance Insights", icon = icon("chart-bar"),
                  fluidRow(
                    column(12, h4("Performance Comparison by Carrier and Quality")),
-                   column(6, 
+                   column(6,
                           h5(strong("Chart 1: Avg. Download Speed (kbps) by Carrier")),
                           plotOutput("dl_speed_bar", height = "300px")
                    ),
-                   column(6, 
+                   column(6,
                           h5(strong("Chart 2: Signal Quality (SNR) Distribution")),
                           plotOutput("snr_box", height = "300px")
                    )
                  ),
                  fluidRow(
-                   column(12, 
+                   column(12,
                           h5(strong("Chart 3: Signal Strength vs. Download Speed")),
                           plotOutput("dl_vs_rxlev_scatter", height = "350px")
                    )
                  )
         ),
         
-        # TAB 3: Model Explorer (Linear Regression Output)
-        tabPanel("Model Explorer", icon = icon("flask"),
-                 h4("Linear Regression Model Summary: DL Speed Drivers"),
-                 p(strong("Dependent Variable:"), " DL Speed (kbps)"),
-                 p(strong("Predictors:"), " RXLEV (dBm), SNR (dB), Population Density, and BAND (MHz)"),
-                 verbatimTextOutput("modelSummary")
+        # --- TAB 3: CLUSTER ANALYSIS TAB ---
+        tabPanel("Cluster Analysis", icon = icon("project-diagram"),
+                 h4("Find Hidden Groups in Your Data (K-Means Clustering)"),
+                 p("This tool finds natural 'clumps' in your data based on the two features you select. It can help you find groups like 'Good Cells', 'Weak Cells', and 'Interference Cells'."),
+                 
+                 fluidRow(
+                   column(4,
+                          sliderInput("k_clusters", "Select Number of Clusters:",
+                                      min = 2, max = 8, value = 3)
+                   ),
+                   column(4,
+                          selectInput("x_var", "Plot X-Axis:", 
+                                      choices = cluster_vars, selected = "RXLEV_dBm")
+                   ),
+                   column(4,
+                          selectInput("y_var", "Plot Y-Axis:", 
+                                      choices = cluster_vars, selected = "SNR_dB")
+                   )
+                 ),
+                 
+                 hr(),
+                 plotOutput("cluster_plot", height = "500px")
         )
       )
     )
   )
 )
 
-# 2. Server Definition
+# -----------------------------------------------------------------
+# 5. SHINY SERVER (THE BRAIN)
+# -----------------------------------------------------------------
 server <- function(input, output, session) {
   
-  #Reactive filtering
-  output$cityMap <- renderLeaflet({
-    
-    # 1. Create a leaflet object
-    leaflet() %>%
-      
-      # 2. Add the background map (the light-grey map tiles)
-      addProviderTiles(providers$CartoDB.Positron) %>%
-      
-      # 3. Set the starting view (centered on India)
-      setView(lng = 78.96, lat = 20.59, zoom = 4)
-  })
-  
-  # --- Reactive Filtering ---
+  # --- Reactive Filter (for Tabs 1, 2, & 3) ---
   filtered_data <- reactive({
-    
-    # Start with the full, final dataset
     data <- final_data_ready
     
-    # 1. Filter by City
     if (input$city_filter != "All") {
       data <- data %>% filter(City == input$city_filter)
     }
-    
-    # 2. Filter by Carrier
-    selected_carriers <- input$carrier_filter
-    if (!"All" %in% selected_carriers) {
-      data <- data %>% filter(Carrier %in% selected_carriers)
+    if (!"All" %in% input$carrier_filter) {
+      data <- data %>% filter(Carrier %in% input$carrier_filter)
     }
-    
-    # 3. Filter by Band
-    selected_bands <- input$band_filter
-    if (!"All" %in% selected_bands) {
-      data <- data %>% filter(BAND_MHz %in% selected_bands)
+    if (!"All" %in% input$band_filter) {
+      data <- data %>% filter(BAND_MHz %in% input$band_filter)
     }
-    
-    # 4. Filter by Signal Quality (THE CORRECTED LOGIC)
     if (input$quality_filter != "All") {
       data <- data %>%
         filter(Signal_Strength_Score == input$quality_filter)
     }
-    
-    # Return the final filtered data
     data
   })
-  observe({
-    data_for_map <- filtered_data() # Gets the new data from the "brain"
-    
-    leafletProxy("cityMap", data = data_for_map) %>%
-      clearHeatmap() %>%    # Clears the old heatmap
-      addHeatmap(           # Draws the new one
-        lng = ~Longitude,
-        lat = ~Latitude,
-        intensity = ~RXLEV_dBm, # Colors it based on signal strength
-        blur=20,
-        max = -50,
-        radius =15 
-      )
-  })
-  # --- TAB 2: Performance Insights ---
   
-  # Chart 1: Download Speed Bar Plot
+  # --- TAB 1: Map Logic ---
+  output$cityMap <- renderLeaflet({
+    leaflet() %>%
+      addProviderTiles(providers$CartoDB.Positron) %>%
+      setView(lng = 78.96, lat = 20.59, zoom = 4)
+  })
+  
+  observe({
+    data_for_map <- filtered_data()
+    proxy <- leafletProxy("cityMap", data = data_for_map) %>% clearHeatmap()
+    if (nrow(data_for_map) > 0) {
+      proxy %>% addHeatmap(lng = ~Longitude, lat = ~Latitude, intensity = ~RXLEV_dBm, blur = 20, max = -50, radius = 15)
+    }
+  })
+  
+  observeEvent(input$city_filter, {
+    if (input$city_filter != "All") {
+      req(nrow(filtered_data()) > 0)
+      data_for_map <- filtered_data()
+      center_lon <- mean(data_for_map$Longitude, na.rm = TRUE)
+      center_lat <- mean(data_for_map$Latitude, na.rm = TRUE)
+      leafletProxy("cityMap") %>% flyTo(lng = center_lon, lat = center_lat, zoom = 12)
+    } else {
+      leafletProxy("cityMap") %>% flyTo(lng = 78.96, lat = 20.59, zoom = 4)
+    }
+  })
+  
+  # --- TAB 2: Plot Logic ---
   output$dl_speed_bar <- renderPlot({
-    
-    # Don't run if no data is filtered
     req(nrow(filtered_data()) > 0)
-    
     filtered_data() %>%
       group_by(Carrier) %>%
       summarise(Avg_DL_Speed = mean(DL_Speed_kbps, na.rm = TRUE)) %>%
       ggplot(aes(x = reorder(Carrier, -Avg_DL_Speed), y = Avg_DL_Speed, fill = Carrier)) +
       geom_bar(stat = "identity") +
       labs(x = "Carrier", y = "Avg. Download Speed (kbps)") +
-      theme_minimal() +
-      theme(legend.position = "none") # Hide legend since X-axis is clear
+      theme_minimal() + theme(legend.position = "none")
   })
+  
   output$snr_box <- renderPlot({
-    
-    # Don't run if no data is filtered
     req(nrow(filtered_data()) > 0)
-    
     ggplot(filtered_data(), aes(x = Carrier, y = SNR_dB, fill = Carrier)) +
       geom_boxplot() +
       labs(x = "Carrier", y = "Signal Quality (SNR dB)") +
-      theme_minimal() +
-      theme(legend.position = "none") # Hide legend
+      theme_minimal() + theme(legend.position = "none")
   })
+  
   output$dl_vs_rxlev_scatter <- renderPlot({
-    
-    # Don't run if no data is filtered
     req(nrow(filtered_data()) > 0)
-    
     ggplot(filtered_data(), aes(x = RXLEV_dBm, y = DL_Speed_kbps, color = SNR_Quality)) +
-      geom_point(alpha = 0.7) + # Use semi-transparent points
-      geom_smooth(method = "lm", se = FALSE, color = "blue") + # Add a trend line
-      labs(x = "Signal Strength (RXLEV dBm)", 
-           y = "Download Speed (kbps)", 
-           color = "SNR Quality") +
+      geom_point(alpha = 0.7) +
+      geom_smooth(method = "lm", se = FALSE, color = "blue") +
+      labs(x = "Signal Strength (RXLEV dBm)", y = "Download Speed (kbps)", color = "SNR Quality") +
       theme_minimal()
   })
   
-}
+  # --- TAB 3: Cluster Logic (INTERACTIVE VERSION) ---
+  
+  # 1. Create a reactive dataset for clustering
+  # THIS IS THE FIX: We only select the two variables
+  # that the user is currently plotting.
+  cluster_data <- reactive({
+    
+    # Get *only* the two features the user is plotting
+    data <- filtered_data() %>%
+      select(all_of(c(input$x_var, input$y_var))) %>%
+      na.omit()
+    
+    # Scale those two features
+    data_scaled <- as.data.frame(scale(data))
+    
+    return(data_scaled)
+  })
+  
+  # 2. Run the K-Means algorithm
+  kmeans_result <- reactive({
+    req(nrow(cluster_data()) > input$k_clusters) # Need more data than clusters
+    
+    # "Lock" the random starting point so results are stable
+    set.seed(13) 
+    
+    # Run the K-Means algorithm
+    kmeans(cluster_data(), centers = input$k_clusters, nstart = 25)
+  })
+  
+  # 3. Create the cluster plot
+  output$cluster_plot <- renderPlot({
+    
+    # Get the original (un-scaled) filtered data, 
+    # but ONLY the two columns we are plotting
+    data_to_plot <- filtered_data() %>%
+      select(all_of(c(input$x_var, input$y_var))) %>%
+      na.omit()
+    
+    # Add the cluster results as a new column
+    data_to_plot$Cluster <- as.factor(kmeans_result()$cluster)
+    
+    # Plot the results using the user's X and Y choices
+    ggplot(data_to_plot, aes(x = .data[[input$x_var]], 
+                             y = .data[[input$y_var]], 
+                             color = Cluster)) +
+      geom_point(alpha = 0.8, size = 3) +
+      labs(x = input$x_var, y = input$y_var, color = "Found Cluster") +
+      theme_minimal(base_size = 14) +
+      guides(color = guide_legend(override.aes = list(size = 5)))
+  })
+  
+} # End server
 
-# 3. Run the App
+# -----------------------------------------------------------------
+# 6. RUN THE APP
+# -----------------------------------------------------------------
 shinyApp(ui = ui, server = server)
