@@ -24,7 +24,7 @@ This project analyzes and visualizes mobile network performance using real-world
 
 ~ Heatmap visualization for spatial trends.
 
-Scatter and box plots for metric relationships.
+~ Scatter and box plots for metric relationships.
 
 ~ K-means clustering for non-linear analysis.
 
