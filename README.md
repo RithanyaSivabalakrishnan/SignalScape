@@ -49,8 +49,12 @@ Linear regression was attempted, but network data showed high variance and did n
 # Data Source
 This project uses the following Kaggle dataset:
 
+
 Network Features Dataset
+
 Author: Alankar Tripathi
+
 Kaggle. https://www.kaggle.com/datasets/alankartripathi/network-features-dataset
+
 
 Population raster files for spatial enhancement as well.
