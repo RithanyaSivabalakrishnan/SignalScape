@@ -9,9 +9,9 @@ library(ggplot2)
 library(terra)
 library(cluster)        # For K-Means Clustering
 
-# -----------------------------------------------------------------
+
 # 2. SETUP: BOUNDING BOXES & CARRIER MAP
-# -----------------------------------------------------------------
+
 city_bounds <- list(
   Ahmedabad = list(lat_min = 22.80, lat_max = 23.30, lon_min = 72.30, lon_max = 72.85),
   Mumbai = list(lat_min = 18.80, lat_max = 19.35, lon_min = 72.70, lon_max = 73.10),
@@ -36,12 +36,10 @@ carrier_map <- tribble(
   999, "Other/Unknown"
 )
 
-# -----------------------------------------------------------------
 # 3. DATA PREPARATION (Adding all features)
-# -----------------------------------------------------------------
 
 # --- Step 3a: Load and Rename ---
-print("Loading raw data...")
+
 raw_full_data <- read_csv("Network Features Data.csv")
 
 initial_data <- raw_full_data %>%
@@ -73,8 +71,8 @@ cleaned_data <- initial_data %>%
   select(-is_valid)
 
 # --- Step 3c: Population Join ---
-print("Loading population data...")
-tif_files <- list.files(path = "C:\\Users\\Ritha\\OneDrive\\Desktop\\AuraNet\\population_ind_pak_general", pattern = "^population_.*_general.*\\.tif$", full.names = TRUE)
+
+tif_files <- list.files(path = "C:\\Users\\Ritha\\OneDrive\\Desktop\\SignalScape\\population_ind_pak_general", pattern = "^population_.*_general.*\\.tif$", full.names = TRUE)
 if (length(tif_files) == 0) {
   stop("No .tif files found. Check the file path.")
 }
@@ -89,7 +87,7 @@ final_data <- cleaned_data %>%
   mutate(Population_Density = ifelse(is.na(Population_Density), 0, Population_Density)) # Fix NAs
 
 # --- Step 3d: Final Feature Engineering ---
-print("Creating final features...")
+
 final_data_ready <- final_data %>%
   left_join(carrier_map, by = "MNC") %>%
   mutate(Carrier = if_else(is.na(CarrierName), "Other/Unknown", CarrierName)) %>%
@@ -123,11 +121,11 @@ cluster_vars <- c("RXLEV_dBm", "SNR_dB", "DL_Speed_kbps")
 
 
 print("Data preparation complete. Starting app...")
-# -----------------------------------------------------------------
+
 # 4. SHINY UI (USER INTERFACE)
-# -----------------------------------------------------------------
+
 ui <- fluidPage(
-  titlePanel("AuraNet: Network Performance Dashboard"),
+  titlePanel("SignalScape: Network Performance Dashboard"),
   
   sidebarLayout(
     sidebarPanel(
@@ -217,9 +215,8 @@ ui <- fluidPage(
   )
 )
 
-# -----------------------------------------------------------------
-# 5. SHINY SERVER (THE BRAIN)
-# -----------------------------------------------------------------
+# 5. SHINY SERVER 
+
 server <- function(input, output, session) {
   
   # --- Reactive Filter (for Tabs 1, 2, & 3) ---
@@ -348,8 +345,7 @@ server <- function(input, output, session) {
   
   #Tab:4 Model explorer
   lm_model <- reactive({
-    # The model uses the full data for the selected City, ignoring other filters
-    # to ensure maximum power and robust coefficients
+    
     data <- final_data_ready
     
     if (input$city_filter != "All") {
@@ -390,7 +386,5 @@ server <- function(input, output, session) {
   
 } # End server
 
-# -----------------------------------------------------------------
 # 6. RUN THE APP
-# -----------------------------------------------------------------
 shinyApp(ui = ui, server = server)
