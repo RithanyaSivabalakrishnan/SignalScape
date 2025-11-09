@@ -49,9 +49,8 @@ Linear regression was attempted, but network data showed high variance and did n
 # Data Source
 This project uses the following Kaggle dataset:
 
-Flight Price Dataset - India 2019
-
-Author: Ankush Sonar
-Kaggle. https://www.kaggle.com/datasets/ankushsonar/flight-price-dataset-india-2019
+Network Features Dataset
+Author: Alankar Tripathi
+Kaggle. https://www.kaggle.com/datasets/alankartripathi/network-features-dataset
 
 Population raster files for spatial enhancement as well.
